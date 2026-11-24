@@ -26,6 +26,7 @@ struct CoreConfig: Codable {
     var anisette_mode: String
     var anisette_url: String
     var device_address: String
+    var log_path: String?
 }
 
 struct InstallOptions: Codable, Hashable {

@@ -109,6 +109,7 @@ mod tests {
             anisette_mode: "local".into(),
             anisette_url: String::new(),
             device_address: String::new(),
+            log_path: None,
         }
     }
 

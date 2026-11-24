@@ -15,6 +15,7 @@ pub mod device;
 pub mod inspect;
 pub mod install;
 pub mod library;
+pub mod logging;
 pub mod protocol;
 
 use std::{
@@ -208,6 +209,8 @@ pub extern "C" fn ferry_core_start(config_json: *const c_char, callback: Callbac
         session: tokio::sync::Mutex::new(None),
         device_lock: tokio::sync::Mutex::new(()),
     });
+    let log_path = shared.config().log_path;
+    logging::init(log_path.as_deref(), shared.clone());
     CORE.set(Core { runtime, shared, next_id: AtomicU64::new(0), tasks: Mutex::new(HashMap::new()) }).is_ok()
 }
 
@@ -221,12 +224,18 @@ pub extern "C" fn ferry_core_request(request_json: *const c_char) -> u64 {
     let text = cstr(request_json).unwrap_or_default();
     let handle = core.runtime.spawn(async move {
         let outcome = match serde_json::from_str::<Request>(&text) {
-            Ok(request) => dispatch(&ctx, request).await,
+            Ok(request) => {
+                log::debug!("request {id}: {}", text.split("\"params\"").next().unwrap_or_default());
+                dispatch(&ctx, request).await
+            }
             Err(e) => Err(Error::Message(format!("Bad request: {e}"))),
         };
         let event = match outcome {
             Ok(result) => Event::Result { id, result },
-            Err(e) => Event::Error { id, message: e.to_string() },
+            Err(e) => {
+                log::warn!("request {id} failed: {e:?}");
+                Event::Error { id, message: e.to_string() }
+            }
         };
         ctx.shared.emit(&event);
         if let Some(core) = CORE.get() {

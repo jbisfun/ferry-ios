@@ -31,13 +31,17 @@ final class Core: @unchecked Sendable {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         return base.appendingPathComponent("Ferry", isDirectory: true)
     }()
+    /// Core debug log, in Documents so it can be shared (Files, Settings → Log).
+    static let logFile: URL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        .appendingPathComponent("ferry-core.log")
     static let tmpDir: URL = FileManager.default.temporaryDirectory.appendingPathComponent("FerryCore", isDirectory: true)
 
     func start(anisetteMode: String, anisetteURL: String, deviceAddress: String) {
         guard !started else { return }
         try? FileManager.default.removeItem(at: Self.tmpDir)
         let config = CoreConfig(data_dir: Self.dataDir.path, tmp_dir: Self.tmpDir.path,
-                                anisette_mode: anisetteMode, anisette_url: anisetteURL, device_address: deviceAddress)
+                                anisette_mode: anisetteMode, anisette_url: anisetteURL, device_address: deviceAddress,
+                                log_path: Self.logFile.path)
         let json = String(data: try! JSONEncoder().encode(config), encoding: .utf8)!
         started = ferry_core_start(json, { cString, _ in
             guard let cString else { return }

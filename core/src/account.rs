@@ -88,13 +88,64 @@ fn two_factor(ctx: &Ctx, req: TwoFactorRequest) -> std::result::Result<TwoFactor
     Err("Two-factor authentication was cancelled".into())
 }
 
+/// Forget the provisioned anisette identity but keep the downloaded CoreADI.
+fn reset_identity(anisette_dir: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(anisette_dir) else { return };
+    for e in entries.flatten() {
+        if e.file_name() == "lib" {
+            continue;
+        }
+        let p = e.path();
+        let _ = if p.is_dir() { std::fs::remove_dir_all(&p) } else { std::fs::remove_file(&p) };
+    }
+}
+
 pub async fn login(ctx: &Ctx, email: &str, password: &str) -> Result<AccountInfo> {
     let cfg = ctx.shared.config();
     ctx.progress("Signing in", None);
     let email_lc = email.trim().to_lowercase();
     let password = password.to_owned();
     let c2 = ctx.clone();
-    let account = Account::login(move || Ok((email_lc.clone(), password.clone())), move |r| two_factor(&c2, r), anisette_config(&cfg)).await?;
+    let anisette_dir = PathBuf::from(&cfg.data_dir).join("anisette");
+    // Identities provisioned before the client-info fix were made under the
+    // Mac description Apple blocks, and GSA rejects them (-22410). Start over once.
+    let marker = anisette_dir.join("client-info-v2");
+    if !marker.exists() {
+        reset_identity(&anisette_dir);
+        let _ = std::fs::create_dir_all(&anisette_dir);
+        let _ = std::fs::write(&marker, b"");
+    }
+    let mut attempt = 0;
+    let account = loop {
+        attempt += 1;
+        let anisette = AnisetteData::new(anisette_config(&cfg)).await.map_err(|e| {
+            log::warn!("anisette failed: {e:?}");
+            e
+        })?;
+        // Shape only (no values): which headers, their lengths, and the client info.
+        let mut shape: Vec<String> = anisette
+            .base_headers
+            .iter()
+            .map(|(k, v)| if k.eq_ignore_ascii_case("x-mme-client-info") || k.eq_ignore_ascii_case("user-agent") { format!("{k}={v}") } else { format!("{k}[{}]", v.len()) })
+            .collect();
+        shape.sort();
+        log::info!("anisette ({}): {}", cfg.anisette_mode, shape.join(", "));
+        let (e2, p2, c3) = (email_lc.clone(), password.clone(), c2.clone());
+        match Account::login_with_anisette(move || Ok((e2.clone(), p2.clone())), move |r| two_factor(&c3, r), anisette).await {
+            Ok(a) => break a,
+            Err(e) => {
+                log::warn!("GSA login failed: {e:?}");
+                let rejected = matches!(e, plume_core::Error::AuthSrpWithMessage(-22410 | -22419, _));
+                if rejected && attempt == 1 && cfg.anisette_mode != "remote" {
+                    log::info!("Apple rejected this anisette identity; provisioning a new one");
+                    ctx.progress("Setting up this iPhone with Apple", None);
+                    reset_identity(&anisette_dir);
+                    continue;
+                }
+                return Err(e.into());
+            }
+        }
+    };
 
     ctx.progress("Loading team", None);
     let adsid = account

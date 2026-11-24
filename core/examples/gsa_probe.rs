@@ -18,6 +18,7 @@ async fn main() {
         anisette_mode: mode.clone(),
         anisette_url: args.get(2).cloned().unwrap_or_else(ferry_core::protocol::default_anisette),
         device_address: String::new(),
+        log_path: None,
     };
     let email = std::env::var("FERRY_PROBE_EMAIL").unwrap_or_else(|_| format!("ferry-probe-{}@example.com", uuid::Uuid::new_v4().simple()));
     if std::env::var("FERRY_PROBE_RAW").is_ok() {

@@ -14,6 +14,7 @@ async fn main() {
         anisette_mode: "local".into(),
         anisette_url: String::new(),
         device_address: ip.clone(),
+        log_path: None,
     };
     std::fs::copy(file, ferry_core::device::pairing_path(&cfg)).unwrap();
     let kind = match ferry_core::device::pairing(&cfg).unwrap() {
@@ -34,6 +35,21 @@ async fn main() {
         match link.put_document(bundle, &name, &std::fs::read(src).unwrap()).await {
             Ok(()) => println!("put Documents/{name} into {bundle}"),
             Err(e) => println!("put failed: {e}"),
+        }
+        return;
+    }
+    // device_probe <pairing> <ip> --get <bundle id> [file] [out]: list Documents / fetch a file.
+    if let Some(i) = args.iter().position(|a| a == "--get") {
+        let bundle = &args[i + 1];
+        match link.documents(bundle, args.get(i + 2).map(String::as_str)).await {
+            Ok((names, data)) => {
+                println!("Documents: {names:?}");
+                if let (Some(d), Some(out)) = (data, args.get(i + 3)) {
+                    std::fs::write(out, &d).unwrap();
+                    println!("saved {} bytes to {out}", d.len());
+                }
+            }
+            Err(e) => println!("get failed: {e}"),
         }
         return;
     }

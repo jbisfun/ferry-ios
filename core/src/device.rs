@@ -106,7 +106,11 @@ fn tunnel_peer() -> Option<IpAddr> {
 pub fn address(cfg: &Config) -> Result<IpAddr> {
     let a = cfg.device_address.trim();
     if a.is_empty() || a.eq_ignore_ascii_case("auto") {
-        return Ok(tunnel_peer().unwrap_or(IpAddr::V4(Ipv4Addr::new(10, 7, 0, 1))));
+        // LocalDevVPN/StosVPN loop exactly 10.7.0.1 back to this iPhone (as
+        // SideStore assumes). The utun interface's own peer (e.g. 10.7.1.1) is
+        // not looped back and resets connections.
+        let _ = tunnel_peer;
+        return Ok(IpAddr::V4(Ipv4Addr::new(10, 7, 0, 1)));
     }
     a.parse().map_err(|_| Error::Message(format!("'{a}' is not an IP address")))
 }
@@ -181,14 +185,18 @@ pub async fn open(cfg: &Config, pin: Option<PinPrompt<'_>>) -> Result<Link> {
             let before = rp.to_bytes();
             let no_pin = || -> futures::future::BoxFuture<'static, String> { Box::pin(async { String::new() }) };
             let pin: PinPrompt = pin.unwrap_or(&no_pin);
+            log::info!("RemotePairing to {addr}:{REMOTE_PAIRING_PORT} as {}", rp.identifier());
             client.connect(&mut rp, || pin()).await.map_err(|e| {
-                Error::Message(format!("This iPhone didn't accept the RemotePairing file ({}). Make a new one for it and import it.", describe(&e)))
+                log::warn!("RemotePairing verify failed: {e:?}");
+                Error::Message(format!("This iPhone didn't accept the RemotePairing file: {e}"))
             })?;
+            log::info!("RemotePairing verified");
             if rp.to_bytes() != before {
                 // Re-paired: keep the new keys.
                 let _ = std::fs::write(rp_pairing_path(cfg), rp.to_bytes());
             }
             let port = client.create_tcp_listener().await?;
+            log::info!("tunnel listener on port {port}");
             let tunnel = connect_tls_psk_tunnel_native(tcp(addr, port).await?, client.encryption_key()).await?;
             let info = tunnel.info.clone();
             let ours: IpAddr = info.client_address.parse().map_err(|_| Error::Message("Bad tunnel address".into()))?;
@@ -197,6 +205,7 @@ pub async fn open(cfg: &Config, pin: Option<PinPrompt<'_>>) -> Result<Link> {
             adapter.set_mss((info.mtu as usize).saturating_sub(60));
             let mut adapter = adapter.to_async_handle();
             let handshake = RsdHandshake::new(adapter.connect(info.server_rsd_port).await?).await?;
+            log::info!("RSD up: {} services", handshake.services.len());
             Ok(Link::Rsd(RsdLink { adapter, handshake }))
         }
         Pairing::Lockdown(pairing_file) => {
@@ -286,6 +295,29 @@ impl Link {
         written?;
         closed?;
         Ok(())
+    }
+
+    /// List an app's Documents, or read one file from it (tooling).
+    pub async fn documents(&mut self, bundle_id: &str, get: Option<&str>) -> Result<(Vec<String>, Option<Vec<u8>>)> {
+        let ha: idevice::house_arrest::HouseArrestClient = match self {
+            Link::Rsd(r) => r.service().await?,
+            Link::Lockdown { provider, .. } => idevice::house_arrest::HouseArrestClient::connect(&*provider).await?,
+        };
+        let mut afc = ha.vend_documents(bundle_id).await?;
+        let names = match afc.list_dir("/Documents").await {
+            Ok(n) => n,
+            Err(e) => vec![format!("(/Documents: {e}; / has {:?})", afc.list_dir("/").await.ok())],
+        };
+        let data = match get {
+            Some(name) => {
+                let mut fd = afc.open(format!("/Documents/{name}"), AfcFopenMode::RdOnly).await?;
+                let d = fd.read_entire().await;
+                let _ = fd.close().await;
+                Some(d?)
+            }
+            None => None,
+        };
+        Ok((names, data))
     }
 
     pub async fn uninstall(&mut self, bundle_id: &str) -> Result<()> {
@@ -391,6 +423,7 @@ mod tests {
             anisette_mode: "local".into(),
             anisette_url: String::new(),
             device_address: addr.into(),
+            log_path: None,
         }
     }
 

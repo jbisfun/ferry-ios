@@ -21,6 +21,9 @@ pub struct Config {
     /// Where the loopback VPN (LocalDevVPN / StosVPN) reaches this device; "auto" = the tunnel peer.
     #[serde(default = "default_device_address")]
     pub device_address: String,
+    /// Where the core writes its debug log (Ferry puts it in Documents).
+    #[serde(default)]
+    pub log_path: Option<String>,
 }
 
 pub fn default_anisette_mode() -> String {

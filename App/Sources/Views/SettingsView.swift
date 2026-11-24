@@ -235,5 +235,10 @@ struct LogView: View {
         }
         .overlay { if Log.shared.lines.isEmpty { ContentUnavailableView("No Log Yet", systemImage: "doc.text") } }
         .navigationTitle("Log")
+        .toolbar {
+            if FileManager.default.fileExists(atPath: Core.logFile.path) {
+                ShareLink(item: Core.logFile) { Label("Share Debug Log", systemImage: "square.and.arrow.up") }
+            }
+        }
     }
 }
