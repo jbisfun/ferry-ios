@@ -96,7 +96,6 @@ async fn gsa_login(anisette: AnisetteData, email: &str, password: &str, ctx: &Ct
     use plume_core::auth::LoginState;
     let mut acct = Account::new_with_anisette(anisette)?;
     let mut state = acct.login_email_pass(email, password).await?;
-    let mut phones = Vec::new();
     for _ in 0..12 {
         log::info!("GSA state: {}", format!("{state:?}").split('(').next().unwrap_or_default());
         state = match state {
@@ -108,41 +107,21 @@ async fn gsa_login(anisette: AnisetteData, email: &str, password: &str, ctx: &Ct
                 }
                 return Err(plume_core::Error::ExtraStep(step));
             }
-            // Apple's SMS route, as SideSign does it: send straight to
-            // /auth/verify/phone/put (no /auth options request, which 403s).
-            LoginState::NeedsSMS2FA => {
-                sms_2fa(&acct, ctx).await?;
+            // 2FA exactly as SideStore's SideSign does it (its headers, its
+            // endpoints); plume's Xcode 11.2 headers get 403s and pushes that
+            // never arrive.
+            // Needs2FAVerification = Apple already pushed a code (hsc 409).
+            LoginState::NeedsDevice2FA => {
+                second_factor(&acct, ctx, true, false).await?;
                 LoginState::NeedsLogin
             }
-            LoginState::NeedsDevice2FA => match acct.get_auth_extras().await {
-                Ok(extras) => {
-                    phones = extras.trusted_phone_numbers.clone();
-                    match extras.new_state {
-                        Some(s) => s,
-                        None if matches!(state, LoginState::NeedsSMS2FA) && !phones.is_empty() => {
-                            acct.send_sms_2fa_to_devices(phones[0].id).await?
-                        }
-                        None => acct.send_2fa_to_devices().await?,
-                    }
-                }
-                Err(e) => {
-                    log::warn!("2FA options unavailable ({e:?}); pushing to trusted devices");
-                    acct.send_2fa_to_devices().await?
-                }
-            },
             LoginState::Needs2FAVerification => {
-                let req = TwoFactorRequest { method: TwoFactorMethod::Device, trusted_phone_numbers: phones.clone() };
-                match tokio::task::block_in_place(|| two_factor(ctx, req)).map_err(|e| plume_core::Error::AuthSrpWithMessage(0, e))? {
-                    TwoFactorAction::SubmitCode(code) => acct.verify_2fa(code).await?,
-                    TwoFactorAction::SendSms(id) => acct.send_sms_2fa_to_devices(id).await?,
-                }
+                second_factor(&acct, ctx, true, true).await?;
+                LoginState::NeedsLogin
             }
-            LoginState::NeedsSMS2FAVerification(body) => {
-                let req = TwoFactorRequest { method: TwoFactorMethod::Sms, trusted_phone_numbers: phones.clone() };
-                match tokio::task::block_in_place(|| two_factor(ctx, req)).map_err(|e| plume_core::Error::AuthSrpWithMessage(0, e))? {
-                    TwoFactorAction::SubmitCode(code) => acct.verify_sms_2fa(code, body).await?,
-                    TwoFactorAction::SendSms(id) => acct.send_sms_2fa_to_devices(id).await?,
-                }
+            LoginState::NeedsSMS2FA | LoginState::NeedsSMS2FAVerification(_) => {
+                second_factor(&acct, ctx, false, false).await?;
+                LoginState::NeedsLogin
             }
         };
     }
@@ -169,6 +148,7 @@ async fn verify_headers(acct: &Account) -> std::result::Result<reqwest::header::
         ("Accept-Language", "en-us"),
         ("Content-Type", "application/x-plist"),
         ("User-Agent", "Xcode"),
+        // SideSign's makeTwoFactorAuthRequest set.
         ("X-Apple-App-Info", "com.apple.gs.xcode.auth"),
         ("X-Xcode-Version", "26.0"),
         ("Connection", "close"),
@@ -199,64 +179,176 @@ fn reply_error(body: &[u8]) -> (i64, Option<String>, Option<plist::Dictionary>) 
     (ec, em, Some(d))
 }
 
-async fn sms_2fa(acct: &Account, ctx: &Ctx) -> std::result::Result<(), plume_core::Error> {
+/// Apple's reply, digits masked, for the log.
+fn masked(body: &[u8]) -> String {
+    String::from_utf8_lossy(body).chars().filter(|c| !c.is_control()).map(|c| if c.is_ascii_digit() { '#' } else { c }).take(600).collect()
+}
+
+/// Title/message of an XMLUI `<alert>` Apple returns instead of an error code.
+fn xmlui_alert(body: &[u8]) -> Option<String> {
+    let s = String::from_utf8_lossy(body);
+    if s.contains("<pinView") {
+        return None;
+    }
+    let start = s.find("<alert")?;
+    let tag = &s[start..start + s[start..].find('>')?];
+    if tag.contains(" id=") {
+        return None;
+    }
+    let attr = |name: &str| {
+        let i = tag.find(&format!("{name}=\""))? + name.len() + 2;
+        Some(tag[i..i + tag[i..].find('"')?].to_owned())
+    };
+    attr("message").or_else(|| attr("title")).or_else(|| Some("Apple refused the request".into()))
+}
+
+fn phones_from(d: &plist::Dictionary) -> Vec<plume_core::auth::TrustedPhoneNumber> {
+    let list = d.get("trustedPhoneNumbers").or_else(|| d.get("phoneNumbers")).and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    list.iter()
+        .filter_map(|p| {
+            let p = p.as_dictionary()?;
+            let id = p.get("id")?.as_signed_integer()? as u32;
+            let number = ["numberWithDialCode", "obfuscatedNumber"]
+                .iter()
+                .find_map(|k| p.get(*k).and_then(|v| v.as_string()).map(str::to_owned))
+                .or_else(|| p.get("lastTwoDigits").and_then(|v| v.as_string()).map(|d| format!("••{d}")))
+                .unwrap_or_else(|| format!("Phone {id}"));
+            serde_json::from_value(serde_json::json!({"id": id, "numberWithDialCode": number, "lastTwoDigits": "", "pushMode": "sms"})).ok()
+        })
+        .collect()
+}
+
+enum Channel {
+    Device,
+    Sms(String),
+}
+
+/// SideSign's handle2FARequest: learn the trusted numbers, deliver a code by
+/// push or SMS, verify it. Apple wants another SRP login afterwards.
+async fn second_factor(acct: &Account, ctx: &Ctx, trusted_device: bool, already_sent: bool) -> std::result::Result<(), plume_core::Error> {
     let fail = |m: String| plume_core::Error::AuthSrpWithMessage(0, m);
     let client = reqwest::Client::builder().build().map_err(|e| fail(e.to_string()))?;
-    let mut phone_id = "1".to_string();
-    let mut send = true;
-    loop {
-        if send {
-            let body = dict(&[("serverInfo", dict(&[("mode", "sms".into()), ("phoneNumber.id", phone_id.clone().into())]))]);
-            let res = client
-                .post(format!("{PHONE_BASE}/put?mode=sms"))
-                .headers(verify_headers(acct).await?)
-                .body(plist_body(body))
-                .send()
-                .await
-                .map_err(|e| fail(e.to_string()))?;
-            let status = res.status().as_u16();
-            let bytes = res.bytes().await.map_err(|e| fail(e.to_string()))?;
-            let (ec, em, d) = reply_error(&bytes);
-            log::info!("SMS send: HTTP {status} ec {ec} keys {:?}", d.as_ref().map(|d| d.keys().cloned().collect::<Vec<_>>()));
-            if ec != 0 || !(200..300).contains(&status) {
-                return Err(plume_core::Error::AuthSrpWithMessage(if ec != 0 { ec } else { status.into() }, em.unwrap_or_else(|| "Apple didn't send a verification code".into())));
+
+    // The numbers Apple has (SideSign reads them from the login reply; /auth has them too).
+    let mut phones = Vec::new();
+    {
+        let mut h = verify_headers(acct).await?;
+        h.insert("Accept", reqwest::header::HeaderValue::from_static("application/json"));
+        match client.get("https://gsa.apple.com/auth").headers(h).send().await {
+            Ok(res) => {
+                let status = res.status().as_u16();
+                let bytes = res.bytes().await.unwrap_or_default();
+                let (_, _, d) = reply_error(&bytes);
+                if let Some(d) = d.as_ref() {
+                    phones = phones_from(d);
+                }
+                log::info!("2FA options: HTTP {status}, {} trusted numbers", phones.len());
+                if phones.is_empty() {
+                    log::debug!("2FA options body: {}", masked(&bytes));
+                }
             }
-            if let Some(id) = d.as_ref().and_then(|d| d.get("phoneNumber")).and_then(|p| p.as_dictionary()).and_then(|p| p.get("id")) {
-                phone_id = id.as_signed_integer().map(|i| i.to_string()).or_else(|| id.as_string().map(str::to_owned)).unwrap_or(phone_id);
-            }
+            Err(e) => log::warn!("2FA options: {e}"),
         }
-        let req = TwoFactorRequest { method: TwoFactorMethod::Sms, trusted_phone_numbers: Vec::new() };
-        match tokio::task::block_in_place(|| two_factor(ctx, req)).map_err(fail)? {
-            TwoFactorAction::SendSms(id) => {
-                phone_id = id.to_string();
-                send = true;
-            }
-            TwoFactorAction::SubmitCode(code) => {
-                let body = dict(&[
-                    ("securityCode.code", code.into()),
-                    ("serverInfo", dict(&[("mode", "sms".into()), ("phoneNumber.id", phone_id.clone().into())])),
-                ]);
+    }
+
+    let send = async |channel: &Channel| -> std::result::Result<Channel, plume_core::Error> {
+        match channel {
+            Channel::Device => {
                 let res = client
-                    .post(format!("{PHONE_BASE}/securitycode?referrer=/auth/verify/phone/put"))
+                    .get("https://gsa.apple.com/auth/verify/trusteddevice")
+                    .headers(verify_headers(acct).await?)
+                    .send()
+                    .await
+                    .map_err(|e| fail(e.to_string()))?;
+                let status = res.status().as_u16();
+                let bytes = res.bytes().await.unwrap_or_default();
+                log::info!("2FA push: HTTP {status}: {}", masked(&bytes));
+                if let Some(alert) = xmlui_alert(&bytes) {
+                    return Err(fail(alert));
+                }
+                if status != 200 {
+                    return Err(plume_core::Error::AuthSrpWithMessage(status.into(), "Apple didn't send a code to your devices".into()));
+                }
+                Ok(Channel::Device)
+            }
+            Channel::Sms(id) => {
+                let body = dict(&[("serverInfo", dict(&[("mode", "sms".into()), ("phoneNumber.id", id.clone().into())]))]);
+                let res = client
+                    .post(format!("{PHONE_BASE}/put?mode=sms"))
                     .headers(verify_headers(acct).await?)
                     .body(plist_body(body))
                     .send()
                     .await
                     .map_err(|e| fail(e.to_string()))?;
                 let status = res.status().as_u16();
-                let pe = res.headers().contains_key("x-apple-pe-token");
-                let bytes = res.bytes().await.map_err(|e| fail(e.to_string()))?;
-                let (ec, em, _) = reply_error(&bytes);
-                log::info!("SMS verify: HTTP {status} ec {ec} pe-token {pe}");
-                if (200..300).contains(&status) && ec == 0 && pe {
-                    return Ok(());
+                let bytes = res.bytes().await.unwrap_or_default();
+                let (ec, em, d) = reply_error(&bytes);
+                log::info!("2FA SMS to phone {id}: HTTP {status} ec {ec}: {}", masked(&bytes));
+                if let Some(alert) = xmlui_alert(&bytes) {
+                    return Err(fail(alert));
                 }
-                if ec == -21669 || status == 400 || (status == 200 && !pe) {
-                    // Wrong code: ask again without resending.
-                    send = false;
+                if ec != 0 || status != 200 {
+                    return Err(plume_core::Error::AuthSrpWithMessage(if ec != 0 { ec } else { status.into() }, em.unwrap_or_else(|| "Apple didn't send a text".into())));
+                }
+                let id = d
+                    .as_ref()
+                    .and_then(|d| d.get("phoneNumber"))
+                    .and_then(|p| p.as_dictionary())
+                    .and_then(|p| p.get("id"))
+                    .and_then(|v| v.as_signed_integer().map(|i| i.to_string()).or_else(|| v.as_string().map(str::to_owned)))
+                    .unwrap_or_else(|| id.clone());
+                Ok(Channel::Sms(id))
+            }
+        }
+    };
+
+    let mut channel = if trusted_device {
+        if already_sent { Channel::Device } else { send(&Channel::Device).await? }
+    } else {
+        send(&Channel::Sms(phones.first().map(|p| p.id.to_string()).unwrap_or_else(|| "1".into()))).await?
+    };
+    loop {
+        let method = if matches!(channel, Channel::Device) { TwoFactorMethod::Device } else { TwoFactorMethod::Sms };
+        let req = TwoFactorRequest { method, trusted_phone_numbers: phones.clone() };
+        match tokio::task::block_in_place(|| two_factor(ctx, req)).map_err(fail)? {
+            TwoFactorAction::SendSms(id) => channel = send(&Channel::Sms(id.to_string())).await?,
+            TwoFactorAction::SubmitCode(code) => {
+                let res = match &channel {
+                    Channel::Device => {
+                        let mut h = verify_headers(acct).await?;
+                        h.insert("security-code", reqwest::header::HeaderValue::from_str(&code).map_err(|_| plume_core::Error::Bad2faCode)?);
+                        client.get("https://gsa.apple.com/grandslam/GsService2/validate").headers(h).send().await
+                    }
+                    Channel::Sms(id) => {
+                        let body = dict(&[
+                            ("securityCode.code", code.clone().into()),
+                            ("serverInfo", dict(&[("mode", "sms".into()), ("phoneNumber.id", id.clone().into())])),
+                        ]);
+                        client
+                            .post(format!("{PHONE_BASE}/securitycode?referrer=/auth/verify/phone/put"))
+                            .headers(verify_headers(acct).await?)
+                            .body(plist_body(body))
+                            .send()
+                            .await
+                    }
+                }
+                .map_err(|e| fail(e.to_string()))?;
+                let status = res.status().as_u16();
+                let pe = res.headers().contains_key("x-apple-pe-token");
+                let bytes = res.bytes().await.unwrap_or_default();
+                let (ec, em, _) = reply_error(&bytes);
+                log::info!("2FA verify: HTTP {status} ec {ec} pe-token {pe}");
+                if ec == -21669 || (ec == 0 && status != 200) || (matches!(channel, Channel::Sms(_)) && status == 200 && ec == 0 && !pe) {
+                    // Wrong code: ask again without sending another.
                     continue;
                 }
-                return Err(plume_core::Error::AuthSrpWithMessage(if ec != 0 { ec } else { status.into() }, em.unwrap_or_else(|| "Verification failed".into())));
+                if ec != 0 {
+                    return Err(plume_core::Error::AuthSrpWithMessage(ec, em.unwrap_or_else(|| "Verification failed".into())));
+                }
+                if let Some(alert) = xmlui_alert(&bytes) {
+                    return Err(fail(alert));
+                }
+                return Ok(());
             }
         }
     }
