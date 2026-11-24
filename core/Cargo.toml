@@ -18,6 +18,7 @@ xkit = { git = "https://github.com/jbisfun/xkit" }
 idevice = { version = "=0.1.68", default-features = false, features = ["full", "ring"] }
 goblin = "0.9"
 libc = "0.2"
+base64 = "0.22"
 # Bridges idevice's tracing events into `log` (core log file).
 tracing = { version = "0.1", features = ["log"] }
 # Both ring and aws-lc end up enabled in the tree, so the TLS provider is chosen explicitly at start.

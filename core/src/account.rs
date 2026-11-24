@@ -108,7 +108,13 @@ async fn gsa_login(anisette: AnisetteData, email: &str, password: &str, ctx: &Ct
                 }
                 return Err(plume_core::Error::ExtraStep(step));
             }
-            LoginState::NeedsDevice2FA | LoginState::NeedsSMS2FA => match acct.get_auth_extras().await {
+            // Apple's SMS route, as SideSign does it: send straight to
+            // /auth/verify/phone/put (no /auth options request, which 403s).
+            LoginState::NeedsSMS2FA => {
+                sms_2fa(&acct, ctx).await?;
+                LoginState::NeedsLogin
+            }
+            LoginState::NeedsDevice2FA => match acct.get_auth_extras().await {
                 Ok(extras) => {
                     phones = extras.trusted_phone_numbers.clone();
                     match extras.new_state {
@@ -141,6 +147,119 @@ async fn gsa_login(anisette: AnisetteData, email: &str, password: &str, ctx: &Ct
         };
     }
     Err(plume_core::Error::AuthSrpWithMessage(0, "Sign-in didn't finish".into()))
+}
+
+const PHONE_BASE: &str = "https://gsa.apple.com/auth/verify/phone";
+
+/// Headers for Apple's /auth/verify endpoints, matching SideSign.
+async fn verify_headers(acct: &Account) -> std::result::Result<reqwest::header::HeaderMap, plume_core::Error> {
+    use base64::Engine;
+    use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+    let spd = acct.spd.as_ref().ok_or_else(|| plume_core::Error::AuthenticationResponse("Missing 2FA session".into()))?;
+    let get = |k: &str| spd.get(k).and_then(plist::Value::as_string).unwrap_or_default().to_owned();
+    let identity = base64::engine::general_purpose::STANDARD.encode(format!("{}:{}", get("adsid"), get("GsIdmsToken")));
+    let mut h = HeaderMap::new();
+    for (k, v) in acct.get_anisette().await?.generate_headers(false, true, false) {
+        if let (Ok(k), Ok(v)) = (HeaderName::from_bytes(k.as_bytes()), HeaderValue::from_str(&v)) {
+            h.insert(k, v);
+        }
+    }
+    for (k, v) in [
+        ("Accept", "application/x-buddyml"),
+        ("Accept-Language", "en-us"),
+        ("Content-Type", "application/x-plist"),
+        ("User-Agent", "Xcode"),
+        ("X-Apple-App-Info", "com.apple.gs.xcode.auth"),
+        ("X-Xcode-Version", "26.0"),
+        ("Connection", "close"),
+    ] {
+        h.insert(k, HeaderValue::from_static(v));
+    }
+    h.insert("X-Apple-Identity-Token", HeaderValue::from_str(&identity).map_err(|_| plume_core::Error::AuthenticationResponse("Bad identity token".into()))?);
+    Ok(h)
+}
+
+fn plist_body(v: plist::Value) -> Vec<u8> {
+    let mut out = Vec::new();
+    let _ = plist::to_writer_xml(&mut out, &v);
+    out
+}
+
+fn dict(pairs: &[(&str, plist::Value)]) -> plist::Value {
+    plist::Value::Dictionary(pairs.iter().map(|(k, v)| (k.to_string(), v.clone())).collect())
+}
+
+/// `ec`/`em` from a plist or JSON reply (also under `Status`).
+fn reply_error(body: &[u8]) -> (i64, Option<String>, Option<plist::Dictionary>) {
+    let d: Option<plist::Dictionary> = plist::from_bytes(body).ok().or_else(|| serde_json::from_slice::<serde_json::Value>(body).ok().and_then(|j| plist::to_value(&j).ok()).and_then(|v| v.into_dictionary()));
+    let Some(d) = d else { return (0, None, None) };
+    let status = d.get("Status").and_then(|s| s.as_dictionary());
+    let ec = d.get("ec").or_else(|| status.and_then(|s| s.get("ec"))).and_then(|v| v.as_signed_integer()).unwrap_or(0);
+    let em = d.get("em").or_else(|| status.and_then(|s| s.get("em"))).and_then(|v| v.as_string()).map(str::to_owned);
+    (ec, em, Some(d))
+}
+
+async fn sms_2fa(acct: &Account, ctx: &Ctx) -> std::result::Result<(), plume_core::Error> {
+    let fail = |m: String| plume_core::Error::AuthSrpWithMessage(0, m);
+    let client = reqwest::Client::builder().build().map_err(|e| fail(e.to_string()))?;
+    let mut phone_id = "1".to_string();
+    let mut send = true;
+    loop {
+        if send {
+            let body = dict(&[("serverInfo", dict(&[("mode", "sms".into()), ("phoneNumber.id", phone_id.clone().into())]))]);
+            let res = client
+                .post(format!("{PHONE_BASE}/put?mode=sms"))
+                .headers(verify_headers(acct).await?)
+                .body(plist_body(body))
+                .send()
+                .await
+                .map_err(|e| fail(e.to_string()))?;
+            let status = res.status().as_u16();
+            let bytes = res.bytes().await.map_err(|e| fail(e.to_string()))?;
+            let (ec, em, d) = reply_error(&bytes);
+            log::info!("SMS send: HTTP {status} ec {ec} keys {:?}", d.as_ref().map(|d| d.keys().cloned().collect::<Vec<_>>()));
+            if ec != 0 || !(200..300).contains(&status) {
+                return Err(plume_core::Error::AuthSrpWithMessage(if ec != 0 { ec } else { status.into() }, em.unwrap_or_else(|| "Apple didn't send a verification code".into())));
+            }
+            if let Some(id) = d.as_ref().and_then(|d| d.get("phoneNumber")).and_then(|p| p.as_dictionary()).and_then(|p| p.get("id")) {
+                phone_id = id.as_signed_integer().map(|i| i.to_string()).or_else(|| id.as_string().map(str::to_owned)).unwrap_or(phone_id);
+            }
+        }
+        let req = TwoFactorRequest { method: TwoFactorMethod::Sms, trusted_phone_numbers: Vec::new() };
+        match tokio::task::block_in_place(|| two_factor(ctx, req)).map_err(fail)? {
+            TwoFactorAction::SendSms(id) => {
+                phone_id = id.to_string();
+                send = true;
+            }
+            TwoFactorAction::SubmitCode(code) => {
+                let body = dict(&[
+                    ("securityCode.code", code.into()),
+                    ("serverInfo", dict(&[("mode", "sms".into()), ("phoneNumber.id", phone_id.clone().into())])),
+                ]);
+                let res = client
+                    .post(format!("{PHONE_BASE}/securitycode?referrer=/auth/verify/phone/put"))
+                    .headers(verify_headers(acct).await?)
+                    .body(plist_body(body))
+                    .send()
+                    .await
+                    .map_err(|e| fail(e.to_string()))?;
+                let status = res.status().as_u16();
+                let pe = res.headers().contains_key("x-apple-pe-token");
+                let bytes = res.bytes().await.map_err(|e| fail(e.to_string()))?;
+                let (ec, em, _) = reply_error(&bytes);
+                log::info!("SMS verify: HTTP {status} ec {ec} pe-token {pe}");
+                if (200..300).contains(&status) && ec == 0 && pe {
+                    return Ok(());
+                }
+                if ec == -21669 || status == 400 || (status == 200 && !pe) {
+                    // Wrong code: ask again without resending.
+                    send = false;
+                    continue;
+                }
+                return Err(plume_core::Error::AuthSrpWithMessage(if ec != 0 { ec } else { status.into() }, em.unwrap_or_else(|| "Verification failed".into())));
+            }
+        }
+    }
 }
 
 /// Forget the provisioned anisette identity but keep the downloaded CoreADI.
