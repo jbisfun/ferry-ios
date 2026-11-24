@@ -106,6 +106,7 @@ mod tests {
         Config {
             data_dir: dir.to_string_lossy().into(),
             tmp_dir: dir.join("tmp").to_string_lossy().into(),
+            anisette_mode: "local".into(),
             anisette_url: String::new(),
             device_address: String::new(),
         }

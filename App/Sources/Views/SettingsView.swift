@@ -55,6 +55,18 @@ struct SettingsView: View {
                 }
 
                 Section {
+                    Picker("Anisette", selection: $model.anisetteMode) {
+                        Text("On This iPhone").tag("local")
+                        Text("Remote Server").tag("remote")
+                    }
+                } footer: {
+                    Text(model.anisetteMode == "local"
+                         ? "Ferry vouches for this iPhone itself by running Apple's anisette code locally (no JIT, no third-party server). The first sign-in downloads it from Apple and takes a little longer."
+                         : "A remote server vouches for this iPhone when signing in to Apple.")
+                }
+
+                Section {
+                    if model.anisetteMode == "remote" {
                     Picker("Anisette Server", selection: $model.anisetteURL) {
                         ForEach(AppModel.anisetteServers, id: \.url) { Text($0.name).tag($0.url) }
                         if !AppModel.anisetteServers.contains(where: { $0.url == model.anisetteURL }) {
@@ -64,12 +76,13 @@ struct SettingsView: View {
                     TextField("Custom server", text: $model.anisetteURL)
                         .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
                         .font(.callout.monospaced())
+                    }
                     TextField("Device address", text: $model.deviceAddress)
                         .keyboardType(.numbersAndPunctuation).font(.callout.monospaced())
                 } header: {
                     Text("Advanced")
                 } footer: {
-                    Text("Anisette servers vouch for this device when signing in to Apple. The device address is where the VPN routes this iPhone's lockdown service (10.7.0.1 for LocalDevVPN/StosVPN).")
+                    Text("The device address is where the VPN routes this iPhone's lockdown service (10.7.0.1 for LocalDevVPN/StosVPN).")
                 }
 
                 Section {

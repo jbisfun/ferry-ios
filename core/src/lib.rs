@@ -140,6 +140,12 @@ async fn dispatch(ctx: &Ctx, request: Request) -> Result<serde_json::Value> {
     match request {
         Request::SettingsUpdate(u) => {
             let mut c = ctx.shared.config.write().unwrap();
+            if let Some(m) = u.anisette_mode {
+                if m != "local" && m != "remote" {
+                    return err(format!("Unknown anisette mode '{m}'"));
+                }
+                c.anisette_mode = m;
+            }
             if let Some(a) = u.anisette_url {
                 c.anisette_url = a;
             }

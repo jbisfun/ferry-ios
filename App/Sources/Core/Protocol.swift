@@ -23,6 +23,7 @@ enum CoreMethod: String, CaseIterable {
 struct CoreConfig: Codable {
     var data_dir: String
     var tmp_dir: String
+    var anisette_mode: String
     var anisette_url: String
     var device_address: String
 }

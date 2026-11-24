@@ -33,11 +33,11 @@ final class Core: @unchecked Sendable {
     }()
     static let tmpDir: URL = FileManager.default.temporaryDirectory.appendingPathComponent("FerryCore", isDirectory: true)
 
-    func start(anisetteURL: String, deviceAddress: String) {
+    func start(anisetteMode: String, anisetteURL: String, deviceAddress: String) {
         guard !started else { return }
         try? FileManager.default.removeItem(at: Self.tmpDir)
         let config = CoreConfig(data_dir: Self.dataDir.path, tmp_dir: Self.tmpDir.path,
-                                anisette_url: anisetteURL, device_address: deviceAddress)
+                                anisette_mode: anisetteMode, anisette_url: anisetteURL, device_address: deviceAddress)
         let json = String(data: try! JSONEncoder().encode(config), encoding: .utf8)!
         started = ferry_core_start(json, { cString, _ in
             guard let cString else { return }

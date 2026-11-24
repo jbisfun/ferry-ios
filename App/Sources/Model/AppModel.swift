@@ -26,6 +26,8 @@ final class AppModel {
     }
 
     // Settings (UserDefaults-backed).
+    /// "local" = computed on this iPhone; "remote" = `anisetteURL`.
+    var anisetteMode: String { didSet { save("anisetteMode", anisetteMode); pushSettings() } }
     var anisetteURL: String { didSet { save("anisetteURL", anisetteURL); pushSettings() } }
     var deviceAddress: String { didSet { save("deviceAddress", deviceAddress); pushSettings() } }
     var notifyBeforeExpiry: Bool { didSet { save("notifyBeforeExpiry", notifyBeforeExpiry); scheduleExpiryNotifications() } }
@@ -53,18 +55,20 @@ final class AppModel {
 
     init() {
         let d = UserDefaults.standard
+        anisetteMode = d.string(forKey: "anisetteMode") ?? "local"
         anisetteURL = d.string(forKey: "anisetteURL") ?? Self.anisetteServers[0].url
         deviceAddress = d.string(forKey: "deviceAddress") ?? "10.7.0.1"
         notifyBeforeExpiry = d.object(forKey: "notifyBeforeExpiry") as? Bool ?? true
-        Core.shared.start(anisetteURL: anisetteURL, deviceAddress: deviceAddress)
+        Self.adoptPairingFileFromDocuments()
+        Core.shared.start(anisetteMode: anisetteMode, anisetteURL: anisetteURL, deviceAddress: deviceAddress)
         Core.shared.onPrompt = { [weak self] id, req in self?.present(prompt: id, req) }
     }
 
     private func save(_ k: String, _ v: Any) { UserDefaults.standard.set(v, forKey: k) }
 
     private func pushSettings() {
-        struct U: Encodable { var anisette_url: String; var device_address: String }
-        Task { _ = try? await Core.shared.call(.settingsUpdate, U(anisette_url: anisetteURL, device_address: deviceAddress), as: JSONValue.self) }
+        struct U: Encodable { var anisette_mode: String; var anisette_url: String; var device_address: String }
+        Task { _ = try? await Core.shared.call(.settingsUpdate, U(anisette_mode: anisetteMode, anisette_url: anisetteURL, device_address: deviceAddress), as: JSONValue.self) }
     }
 
     func show(_ error: Error, title: String = "Something went wrong") {
@@ -124,6 +128,23 @@ final class AppModel {
             deviceApps = (try? await Core.shared.call(.deviceApps)) ?? []
         } catch {
             device = .failed(error.localizedDescription)
+        }
+    }
+
+    /// A pairing file dropped into Documents (Files app, Finder, or pushed by
+    /// Jimpactor) is moved into Ferry's private data at launch.
+    static func adoptPairingFileFromDocuments() {
+        let fm = FileManager.default
+        let docs = fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let names = ["pairing.plist", "pairingFile.plist", "ALTPairingFile.mobiledevicepairing"]
+        guard let src = names.map({ docs.appendingPathComponent($0) }).first(where: { fm.fileExists(atPath: $0.path) }),
+              let data = try? Data(contentsOf: src),
+              let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+              plist["HostCertificate"] != nil else { return }
+        try? fm.createDirectory(at: Core.dataDir, withIntermediateDirectories: true)
+        let dest = Core.dataDir.appendingPathComponent("pairing.plist")
+        if (try? data.write(to: dest, options: [.atomic, .completeFileProtection])) != nil {
+            try? fm.removeItem(at: src)
         }
     }
 

@@ -34,8 +34,11 @@ impl Session {
 }
 
 pub fn anisette_config(cfg: &Config) -> AnisetteConfiguration {
+    // Local: the Mac CoreADI library is fetched once from Apple's iTunes
+    // installer into <data>/anisette/lib and run on-device.
+    let provider = if cfg.anisette_mode == "remote" { AnisetteProvider::Remote } else { AnisetteProvider::Local };
     AnisetteConfiguration::new()
-        .set_provider(AnisetteProvider::Remote)
+        .set_provider(provider)
         .set_anisette_url_v3(cfg.anisette_url.clone())
         // The anisette identity persists here; a trusted identity skips 2FA next time.
         .set_configuration_path(PathBuf::from(&cfg.data_dir).join("anisette"))

@@ -90,7 +90,8 @@ fn main() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let data = rt.block_on(plume_core::auth::anisette_data::AnisetteData::new(ferry_core::account::anisette_config(&cfg)));
         match data {
-            Ok(d) => println!("anisette from {}: {} headers ({})", cfg.anisette_url, d.base_headers.len(),
+            Ok(d) => println!("anisette ({}; CoreADI on disk: {}): {} headers ({})", cfg.anisette_mode,
+                std::path::Path::new(&cfg.data_dir).join("anisette/lib/mac/CoreADI").exists(), d.base_headers.len(),
                 d.base_headers.keys().filter(|k| k.starts_with("X-Apple-I-M")).cloned().collect::<Vec<_>>().join(", ")),
             Err(e) => println!("anisette from {} FAILED: {e}", cfg.anisette_url),
         }

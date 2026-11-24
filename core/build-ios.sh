@@ -25,8 +25,24 @@ export AR_aarch64_apple_ios="$SWIFTLY_BIN/llvm-ar"
 export CFLAGS_aarch64_apple_ios="--target=arm64-apple-ios16.0 -isysroot $IOS_SDK"
 export CXXFLAGS_aarch64_apple_ios="$CFLAGS_aarch64_apple_ios"
 
+# On-device anisette runs Apple's Mac CoreADI under Unicorn. iOS forbids JIT,
+# so Unicorn must be the interpreter-only (TCI) build, which
+# ~/projs/WaffleStore/AnisetteKit/MacADI/build-ios.sh produces; unicorn-engine-sys
+# links it through pkg-config instead of building its own (JIT) copy.
+UNICORN_IOS_DIR="${UNICORN_IOS_DIR:-$HOME/projs/WaffleStore/AnisetteKit/MacADI/vendor/unicorn/build_ios_multi}"
+[ -f "$UNICORN_IOS_DIR/libunicorn.a" ] && [ -f "$UNICORN_IOS_DIR/unicorn.pc" ] || {
+    echo "missing TCI Unicorn in $UNICORN_IOS_DIR (run bash ~/projs/WaffleStore/AnisetteKit/MacADI/build-ios.sh, or set UNICORN_IOS_DIR)" >&2; exit 1; }
+"$SWIFTLY_BIN/llvm-ar" t "$UNICORN_IOS_DIR/libunicorn.a" | grep -qx tci.c.o || { echo "$UNICORN_IOS_DIR/libunicorn.a is not a TCI build" >&2; exit 1; }
+export PKG_CONFIG_ALLOW_CROSS=1 PKG_CONFIG_PATH="$UNICORN_IOS_DIR"
+export LIBCLANG_PATH="${LIBCLANG_PATH:-$(dirname "$SWIFTLY_BIN")/toolchains/$(ls "$(dirname "$SWIFTLY_BIN")/toolchains" | sort -V | tail -1)/usr/lib}"
+export BINDGEN_EXTRA_CLANG_ARGS="--target=arm64-apple-ios -isysroot $IOS_SDK"
+
 # Machine code only (see Cargo.toml [profile.release]).
-export CARGO_TARGET_AARCH64_APPLE_IOS_RUSTFLAGS="-C embed-bitcode=no"
+# Some dependencies (adi-core) also build as dylibs, which need a Mach-O linker.
+IOS_LD="${IOS_LD:-$SDK_BUNDLE/toolset/bin/ld64.lld}"
+SDK_VERSION="$(basename "$IOS_SDK" .sdk)"; SDK_VERSION="${SDK_VERSION#iPhoneOS}"
+export CARGO_TARGET_AARCH64_APPLE_IOS_LINKER="$SWIFTLY_BIN/clang"
+export CARGO_TARGET_AARCH64_APPLE_IOS_RUSTFLAGS="-C embed-bitcode=no -C link-arg=-fuse-ld=$IOS_LD -C link-arg=-isysroot -C link-arg=$IOS_SDK -C link-arg=-Wl,-platform_version,ios,16.0,$SDK_VERSION"
 
 flags=(--target aarch64-apple-ios --lib)
 [ "$PROFILE" = release ] && flags+=(--release)

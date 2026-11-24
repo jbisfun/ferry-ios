@@ -11,7 +11,11 @@ pub struct Config {
     pub data_dir: String,
     /// Scratch space, emptied by the app at launch.
     pub tmp_dir: String,
-    /// Anisette v3 server.
+    /// "local": compute anisette on this iPhone (Apple's Mac CoreADI under an
+    /// interpreter-only Unicorn, no JIT, no server). "remote": ask `anisette_url`.
+    #[serde(default = "default_anisette_mode")]
+    pub anisette_mode: String,
+    /// Anisette v3 server, for "remote".
     #[serde(default = "default_anisette")]
     pub anisette_url: String,
     /// Where the loopback VPN (LocalDevVPN / StosVPN) routes this device's lockdownd.
@@ -19,6 +23,9 @@ pub struct Config {
     pub device_address: String,
 }
 
+pub fn default_anisette_mode() -> String {
+    "local".into()
+}
 pub fn default_anisette() -> String {
     "https://ani.sidestore.zip".into()
 }
@@ -82,6 +89,7 @@ fn default_within() -> i64 {
 
 #[derive(Debug, Default, Deserialize, Serialize)]
 pub struct SettingsUpdate {
+    pub anisette_mode: Option<String>,
     pub anisette_url: Option<String>,
     pub device_address: Option<String>,
 }
