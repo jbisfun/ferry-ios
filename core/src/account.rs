@@ -88,6 +88,61 @@ fn two_factor(ctx: &Ctx, req: TwoFactorRequest) -> std::result::Result<TwoFactor
     Err("Two-factor authentication was cancelled".into())
 }
 
+/// plume's login loop, but an unreadable `/auth` (HTTP 403 for some
+/// identities) falls back to a push to trusted devices instead of failing:
+/// Apple asks new identities for SMS 2FA, and the options request that lists
+/// the phone numbers is the one it refuses.
+async fn gsa_login(anisette: AnisetteData, email: &str, password: &str, ctx: &Ctx) -> std::result::Result<Account, plume_core::Error> {
+    use plume_core::auth::LoginState;
+    let mut acct = Account::new_with_anisette(anisette)?;
+    let mut state = acct.login_email_pass(email, password).await?;
+    let mut phones = Vec::new();
+    for _ in 0..12 {
+        log::info!("GSA state: {}", format!("{state:?}").split('(').next().unwrap_or_default());
+        state = match state {
+            LoginState::LoggedIn => return Ok(acct),
+            LoginState::NeedsLogin => acct.login_email_pass(email, password).await?,
+            LoginState::NeedsExtraStep(step) => {
+                if acct.get_pet().is_some() {
+                    return Ok(acct);
+                }
+                return Err(plume_core::Error::ExtraStep(step));
+            }
+            LoginState::NeedsDevice2FA | LoginState::NeedsSMS2FA => match acct.get_auth_extras().await {
+                Ok(extras) => {
+                    phones = extras.trusted_phone_numbers.clone();
+                    match extras.new_state {
+                        Some(s) => s,
+                        None if matches!(state, LoginState::NeedsSMS2FA) && !phones.is_empty() => {
+                            acct.send_sms_2fa_to_devices(phones[0].id).await?
+                        }
+                        None => acct.send_2fa_to_devices().await?,
+                    }
+                }
+                Err(e) => {
+                    log::warn!("2FA options unavailable ({e:?}); pushing to trusted devices");
+                    acct.send_2fa_to_devices().await?
+                }
+            },
+            LoginState::Needs2FAVerification => {
+                let req = TwoFactorRequest { method: TwoFactorMethod::Device, trusted_phone_numbers: phones.clone() };
+                match tokio::task::block_in_place(|| two_factor(ctx, req)).map_err(|e| plume_core::Error::AuthSrpWithMessage(0, e))? {
+                    TwoFactorAction::SubmitCode(code) => acct.verify_2fa(code).await?,
+                    TwoFactorAction::SendSms(id) => acct.send_sms_2fa_to_devices(id).await?,
+                }
+            }
+            LoginState::NeedsSMS2FAVerification(body) => {
+                let req = TwoFactorRequest { method: TwoFactorMethod::Sms, trusted_phone_numbers: phones.clone() };
+                match tokio::task::block_in_place(|| two_factor(ctx, req)).map_err(|e| plume_core::Error::AuthSrpWithMessage(0, e))? {
+                    TwoFactorAction::SubmitCode(code) => acct.verify_sms_2fa(code, body).await?,
+                    TwoFactorAction::SendSms(id) => acct.send_sms_2fa_to_devices(id).await?,
+                }
+            }
+        };
+    }
+    Err(plume_core::Error::AuthSrpWithMessage(0, "Sign-in didn't finish".into()))
+}
+
 /// Forget the provisioned anisette identity but keep the downloaded CoreADI.
 fn reset_identity(anisette_dir: &std::path::Path) {
     let Ok(entries) = std::fs::read_dir(anisette_dir) else { return };
@@ -130,8 +185,7 @@ pub async fn login(ctx: &Ctx, email: &str, password: &str) -> Result<AccountInfo
             .collect();
         shape.sort();
         log::info!("anisette ({}): {}", cfg.anisette_mode, shape.join(", "));
-        let (e2, p2, c3) = (email_lc.clone(), password.clone(), c2.clone());
-        match Account::login_with_anisette(move || Ok((e2.clone(), p2.clone())), move |r| two_factor(&c3, r), anisette).await {
+        match gsa_login(anisette, &email_lc, &password, &c2).await {
             Ok(a) => break a,
             Err(e) => {
                 log::warn!("GSA login failed: {e:?}");

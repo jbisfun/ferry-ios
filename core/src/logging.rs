@@ -18,7 +18,11 @@ struct Logger {
 }
 
 fn wanted(target: &str, level: log::Level) -> bool {
-    let ours = ["ferry_core", "plume_core", "omnisette", "xkit", "idevice", "jktcp"];
+    // idevice logs pairing files (private keys) at debug: info only.
+    if target.starts_with("idevice") || target.starts_with("jktcp") {
+        return level <= log::Level::Info;
+    }
+    let ours = ["ferry_core", "plume_core", "omnisette", "xkit"];
     if ours.iter().any(|t| target.starts_with(t)) {
         return level <= log::Level::Debug;
     }
