@@ -1,0 +1,49 @@
+[package]
+name = "ferry_core"
+description = "On-device sideloading core for Ferry for iOS: Apple ID login, provisioning, signing, dylib injection and installation over a loopback VPN."
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[lib]
+# staticlib for the iOS app, rlib for host tests.
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+# Apple ID (GrandSlam SRP + 2FA) login and Mach-O load-command editing.
+plume_core = { git = "https://github.com/jpdagostin0/jimpactor", package = "plume_core", features = ["tweaks"] }
+# Provisioning, apple-codesign signing and AFC/installation_proxy installs.
+xkit = { git = "https://github.com/jbisfun/xkit" }
+idevice = { version = "=0.1.68", default-features = false, features = ["full", "ring"] }
+goblin = "0.9"
+# Both ring and aws-lc end up enabled in the tree, so the TLS provider is chosen explicitly at start.
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"] }
+# Only for the header types xkit's anisette trait uses (same version as xkit).
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls", "gzip", "system-proxy"] }
+tokio = { version = "1.43", features = ["rt-multi-thread", "sync", "time", "macros", "fs"] }
+futures = { version = "0.3", default-features = false, features = ["std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+plist = "1.8"
+zip = "8.6"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
+uuid = { version = "1.3", features = ["v4"] }
+log = "0.4"
+thiserror = "2.0"
+
+[dev-dependencies]
+tempfile = "3"
+plume_core = { git = "https://github.com/jpdagostin0/jimpactor", package = "plume_core", features = ["tweaks"] }
+
+[profile.release]
+# No LTO: rustc's LLVM is newer than the Swift toolchain's linker, which
+# must only ever see machine code (build-ios.sh also disables embedded bitcode).
+lto = false
+opt-level = "s"
+strip = "debuginfo"
+
+# omnisette's iOS (remote-only) gating is committed locally but not pushed yet;
+# drop this once github.com/jbisfun/omnisette has it.
+[patch."https://github.com/jbisfun/omnisette"]
+omnisette = { path = "../../omnisette" }

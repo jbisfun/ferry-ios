@@ -1,0 +1,57 @@
+# Ferry for iOS. Build: core/build-ios.sh && idl build -c release  (see README.md)
+toolchain:
+  sdk_bundle: ~/.swiftpm/swift-sdks/darwin.artifactbundle
+  swiftly_bin: ~/.local/share/swiftly/bin
+  actool: idl-actool
+
+targets:
+  - name: Ferry
+    bundle_id: io.github.jbisfun.ferry
+    version: "0.1.0"
+    build_number: "1"
+    min_ios: "17.0"
+    device_family: "1,2"
+    sources: [App/Sources]
+    resources: [App/Resources/Assets.xcassets]
+    # The Rust core (core/build-ios.sh): C header for Swift, static library for the linker.
+    bridging_header: core/out/ferry_core.h
+    ldflags: [core/out/libferry_core.a]
+    frameworks: [SwiftUI, UIKit, Foundation, Security, SystemConfiguration, CoreFoundation, UserNotifications, UniformTypeIdentifiers]
+    libraries: [c++, resolv, z, iconv]
+    swift_version: "5.0"
+    info:
+      CFBundleDisplayName: Ferry
+      UIFileSharingEnabled: true
+      LSSupportsOpeningDocumentsInPlace: false
+      UIApplicationSceneManifest:
+        UIApplicationSupportsMultipleScenes: false
+      UISupportedInterfaceOrientations:
+        - UIInterfaceOrientationPortrait
+      UISupportedInterfaceOrientations~ipad:
+        - UIInterfaceOrientationPortrait
+        - UIInterfaceOrientationPortraitUpsideDown
+        - UIInterfaceOrientationLandscapeLeft
+        - UIInterfaceOrientationLandscapeRight
+      # Open .ipa files from Files, Safari and AirDrop.
+      CFBundleDocumentTypes:
+        - CFBundleTypeName: iOS App
+          LSHandlerRank: Owner
+          LSItemContentTypes: [com.apple.itunes.ipa]
+      UTImportedTypeDeclarations:
+        - UTTypeIdentifier: com.apple.itunes.ipa
+          UTTypeDescription: iOS App
+          UTTypeConformsTo: [public.zip-archive, public.data]
+          UTTypeTagSpecification:
+            public.filename-extension: [ipa]
+            public.mime-type: [application/octet-stream]
+      # ferry://source?url=…, and the AltStore/SideStore link formats.
+      CFBundleURLTypes:
+        - CFBundleURLName: io.github.jbisfun.ferry
+          CFBundleURLSchemes: [ferry, altstore, sidestore]
+      NSLocalNetworkUsageDescription: Ferry talks to this iPhone through your loopback VPN to install apps.
+      NSAppTransportSecurity:
+        NSAllowsLocalNetworking: true
+    configurations:
+      debug:
+        entitlements:
+          get-task-allow: true

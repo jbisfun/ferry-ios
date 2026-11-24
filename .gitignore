@@ -1,0 +1,4 @@
+build/
+.idl/
+core/target/
+core/out/
