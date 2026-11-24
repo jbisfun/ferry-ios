@@ -124,6 +124,7 @@ struct Phone: Codable, Hashable, Identifiable {
 enum PromptRequest: Decodable {
     case twoFactor(method: String, phones: [Phone])
     case revokeCertificates([String])
+    case pairingPin
 
     private enum K: String, CodingKey { case kind, method, phones, certificates }
     init(from d: Decoder) throws {
@@ -131,6 +132,8 @@ enum PromptRequest: Decodable {
         switch try c.decode(String.self, forKey: .kind) {
         case "two_factor":
             self = .twoFactor(method: try c.decode(String.self, forKey: .method), phones: try c.decode([Phone].self, forKey: .phones))
+        case "pairing_pin":
+            self = .pairingPin
         default:
             self = .revokeCertificates(try c.decode([String].self, forKey: .certificates))
         }

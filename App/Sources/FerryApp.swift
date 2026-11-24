@@ -56,6 +56,7 @@ struct RootView: View {
                   primaryButton: .destructive(Text("Revoke")) { model.answer(p.id, PromptAnswer(revoke: true)) },
                   secondaryButton: .cancel { model.answer(p.id, PromptAnswer(revoke: false)) })
         }
+        .sheet(item: $model.pairingPin) { p in PairingPinSheet(prompt: p) }
         .alert(item: $model.alert) { a in Alert(title: Text(a.title), message: Text(a.message)) }
         .onOpenURL { handle($0) }
     }
@@ -224,6 +225,46 @@ struct TwoFactorSheet: View {
     }
 
     private func submit() { answer(PromptAnswer(code: code)) }
+    private func answer(_ a: PromptAnswer) {
+        guard !answered else { return }
+        answered = true
+        model.answer(prompt.id, a)
+        dismiss()
+    }
+}
+
+/// The iPhone asked to pair again and shows a code in a system alert.
+struct PairingPinSheet: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.dismiss) private var dismiss
+    let prompt: PairingPinPrompt
+    @State private var code = ""
+    @State private var answered = false
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    TextField("000000", text: $code)
+                        .keyboardType(.numberPad).textContentType(.oneTimeCode)
+                        .font(.system(.title, design: .rounded).monospacedDigit())
+                        .multilineTextAlignment(.center)
+                } footer: {
+                    Text("This iPhone wants to pair with Ferry again and is showing a code. Enter it here.")
+                }
+            }
+            .navigationTitle("Pair This iPhone")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { answer(PromptAnswer(cancel: true)) } }
+                ToolbarItem(placement: .confirmationAction) { Button("Pair") { answer(PromptAnswer(code: code)) }.disabled(code.isEmpty) }
+            }
+            .onDisappear { if !answered { model.answer(prompt.id, PromptAnswer(cancel: true)) } }
+        }
+        .presentationDetents([.medium])
+        .interactiveDismissDisabled()
+    }
+
     private func answer(_ a: PromptAnswer) {
         guard !answered else { return }
         answered = true

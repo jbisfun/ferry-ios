@@ -43,6 +43,7 @@ final class AppModel {
     // Prompts from the core.
     var twoFactor: TwoFactorPrompt?
     var revoke: RevokePrompt?
+    var pairingPin: PairingPinPrompt?
 
     let sources = SourceStore()
     let downloads = Downloads()
@@ -57,7 +58,9 @@ final class AppModel {
         let d = UserDefaults.standard
         anisetteMode = d.string(forKey: "anisetteMode") ?? "local"
         anisetteURL = d.string(forKey: "anisetteURL") ?? Self.anisetteServers[0].url
-        deviceAddress = d.string(forKey: "deviceAddress") ?? "10.7.0.1"
+        // "auto" = the VPN tunnel's peer; 10.7.0.1 was the old fixed default.
+        let savedAddress = d.string(forKey: "deviceAddress")
+        deviceAddress = savedAddress == nil || savedAddress == "10.7.0.1" ? "auto" : savedAddress!
         notifyBeforeExpiry = d.object(forKey: "notifyBeforeExpiry") as? Bool ?? true
         Self.adoptPairingFileFromDocuments()
         Core.shared.start(anisetteMode: anisetteMode, anisetteURL: anisetteURL, deviceAddress: deviceAddress)
@@ -131,38 +134,59 @@ final class AppModel {
         }
     }
 
-    /// A pairing file dropped into Documents (Files app, Finder, or pushed by
-    /// Jimpactor) is moved into Ferry's private data at launch.
+    enum PairingKind { case remote, lockdown }
+
+    /// RemotePairing (RPPairing) files carry Ed25519 keys; lockdown records carry
+    /// a host certificate. Returns nil for anything else.
+    static func pairingKind(_ data: Data) -> PairingKind? {
+        guard let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else { return nil }
+        if plist["public_key"] != nil, plist["private_key"] != nil, plist["identifier"] != nil { return .remote }
+        if plist["HostCertificate"] != nil, plist["HostPrivateKey"] != nil { return .lockdown }
+        return nil
+    }
+
+    /// Store a pairing file where the core looks for it. A RemotePairing file
+    /// takes priority (it's what iOS 26.4+ needs over a plain VPN).
+    @discardableResult
+    static func storePairing(_ data: Data) throws -> PairingKind {
+        guard let kind = pairingKind(data) else {
+            throw CoreError(message: "That isn't a pairing file. Use a RemotePairing (RPPairing) file, or a lockdown pairing record.")
+        }
+        try FileManager.default.createDirectory(at: Core.dataDir, withIntermediateDirectories: true)
+        let name = kind == .remote ? "rppairing.plist" : "pairing.plist"
+        try data.write(to: Core.dataDir.appendingPathComponent(name), options: [.atomic, .completeFileProtection])
+        return kind
+    }
+
+    /// Pairing files dropped into Documents (Files app, Finder, or pushed by
+    /// Jimpactor) are moved into Ferry's private data at launch.
     static func adoptPairingFileFromDocuments() {
         let fm = FileManager.default
         let docs = fm.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        let names = ["pairing.plist", "pairingFile.plist", "ALTPairingFile.mobiledevicepairing"]
-        guard let src = names.map({ docs.appendingPathComponent($0) }).first(where: { fm.fileExists(atPath: $0.path) }),
-              let data = try? Data(contentsOf: src),
-              let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
-              plist["HostCertificate"] != nil else { return }
-        try? fm.createDirectory(at: Core.dataDir, withIntermediateDirectories: true)
-        let dest = Core.dataDir.appendingPathComponent("pairing.plist")
-        if (try? data.write(to: dest, options: [.atomic, .completeFileProtection])) != nil {
-            try? fm.removeItem(at: src)
+        let names = (try? fm.contentsOfDirectory(atPath: docs.path)) ?? []
+        for name in names where name.hasSuffix(".plist") || name.hasSuffix(".mobiledevicepairing") || name.hasSuffix(".xml") {
+            let url = docs.appendingPathComponent(name)
+            guard let data = try? Data(contentsOf: url), pairingKind(data) != nil else { continue }
+            if (try? storePairing(data)) != nil { try? fm.removeItem(at: url) }
         }
     }
 
     var hasPairingFile: Bool {
-        FileManager.default.fileExists(atPath: Core.dataDir.appendingPathComponent("pairing.plist").path)
+        let fm = FileManager.default
+        return ["rppairing.plist", "pairing.plist"].contains { fm.fileExists(atPath: Core.dataDir.appendingPathComponent($0).path) }
+    }
+
+    var pairingDescription: String {
+        let fm = FileManager.default
+        if fm.fileExists(atPath: Core.dataDir.appendingPathComponent("rppairing.plist").path) { return "RemotePairing" }
+        if fm.fileExists(atPath: Core.dataDir.appendingPathComponent("pairing.plist").path) { return "Lockdown" }
+        return "None"
     }
 
     func importPairingFile(from url: URL) throws {
         let scoped = url.startAccessingSecurityScopedResource()
         defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-        let data = try Data(contentsOf: url)
-        guard let plist = try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
-              plist["HostCertificate"] != nil, plist["HostPrivateKey"] != nil else {
-            throw CoreError(message: "That isn't a pairing file (it has no HostCertificate/HostPrivateKey).")
-        }
-        try FileManager.default.createDirectory(at: Core.dataDir, withIntermediateDirectories: true)
-        let dest = Core.dataDir.appendingPathComponent("pairing.plist")
-        try data.write(to: dest, options: [.atomic, .completeFileProtection])
+        try Self.storePairing(try Data(contentsOf: url))
         Task { await checkDevice() }
     }
 
@@ -247,6 +271,7 @@ final class AppModel {
         switch req {
         case .twoFactor(let method, let phones): twoFactor = TwoFactorPrompt(id: id, method: method, phones: phones)
         case .revokeCertificates(let certs): revoke = RevokePrompt(id: id, certificates: certs)
+        case .pairingPin: pairingPin = PairingPinPrompt(id: id)
         }
     }
 
@@ -289,6 +314,10 @@ struct TwoFactorPrompt: Identifiable {
     var id: UInt64
     var method: String
     var phones: [Phone]
+}
+
+struct PairingPinPrompt: Identifiable {
+    var id: UInt64
 }
 
 struct RevokePrompt: Identifiable {

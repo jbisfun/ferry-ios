@@ -17,6 +17,7 @@ plume_core = { git = "https://github.com/jpdagostin0/jimpactor", package = "plum
 xkit = { git = "https://github.com/jbisfun/xkit" }
 idevice = { version = "=0.1.68", default-features = false, features = ["full", "ring"] }
 goblin = "0.9"
+libc = "0.2"
 # Both ring and aws-lc end up enabled in the tree, so the TLS provider is chosen explicitly at start.
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"] }
 # Only for the header types xkit's anisette trait uses (same version as xkit).
@@ -34,6 +35,9 @@ thiserror = "2.0"
 
 [dev-dependencies]
 tempfile = "3"
+# gsa_probe: a valid SRP A for the init step.
+srp = "0.7.0-rc.1"
+sha2 = "0.11"
 plume_core = { git = "https://github.com/jpdagostin0/jimpactor", package = "plume_core", features = ["tweaks"] }
 
 [profile.release]
@@ -42,4 +46,5 @@ plume_core = { git = "https://github.com/jpdagostin0/jimpactor", package = "plum
 lto = false
 opt-level = "s"
 strip = "debuginfo"
+
 

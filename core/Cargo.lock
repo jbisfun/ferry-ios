@@ -1515,6 +1515,7 @@ dependencies = [
  "futures",
  "goblin",
  "idevice",
+ "libc",
  "log",
  "plist",
  "plume_core",
@@ -1522,6 +1523,8 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
+ "sha2 0.11.1",
+ "srp",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -2816,7 +2819,7 @@ dependencies = [
 [[package]]
 name = "omnisette"
 version = "0.1.22"
-source = "git+https://github.com/jbisfun/omnisette#39efbee4b6cf02addc82fafb1037f97aa44d8167"
+source = "git+https://github.com/jbisfun/omnisette#f94512ec71a41416739aeae0cf9cc2f4082c6f61"
 dependencies = [
  "adi-core",
  "android-loader",

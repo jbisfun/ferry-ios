@@ -18,7 +18,7 @@ pub struct Config {
     /// Anisette v3 server, for "remote".
     #[serde(default = "default_anisette")]
     pub anisette_url: String,
-    /// Where the loopback VPN (LocalDevVPN / StosVPN) routes this device's lockdownd.
+    /// Where the loopback VPN (LocalDevVPN / StosVPN) reaches this device; "auto" = the tunnel peer.
     #[serde(default = "default_device_address")]
     pub device_address: String,
 }
@@ -29,8 +29,9 @@ pub fn default_anisette_mode() -> String {
 pub fn default_anisette() -> String {
     "https://ani.sidestore.zip".into()
 }
+/// "auto" = the loopback VPN tunnel's peer address (10.7.0.1 if none is found).
 pub fn default_device_address() -> String {
-    "10.7.0.1".into()
+    "auto".into()
 }
 
 #[derive(Debug, Deserialize)]
@@ -222,6 +223,8 @@ pub enum Event {
 pub enum PromptRequest {
     /// Answer `{"code": "123456"}` or `{"sms": <phone id>}` or `{"cancel": true}`.
     TwoFactor { method: String, phones: Vec<Phone> },
+    /// The iPhone wants to pair again and shows a code; answer `{"code": "123456"}`.
+    PairingPin,
     /// Free accounts may hold 2 dev certificates; answer `{"revoke": true|false}`.
     RevokeCertificates { certificates: Vec<String> },
 }

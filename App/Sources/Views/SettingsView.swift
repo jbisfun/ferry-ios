@@ -45,13 +45,14 @@ struct SettingsView: View {
                     if case .failed(let m) = model.device {
                         Text(m).font(.caption).foregroundStyle(.secondary)
                     }
+                    LabeledContent("Pairing", value: model.pairingDescription)
                     Button("Check Connection") { Task { await model.checkDevice() } }
                     Button(model.hasPairingFile ? "Replace Pairing File…" : "Import Pairing File…") { importingPairing = true }
                     NavigationLink("Setup Guide") { SetupGuide() }
                 } header: {
                     Text("This iPhone")
                 } footer: {
-                    Text("Ferry installs apps through a loopback VPN (LocalDevVPN or StosVPN) and this iPhone's pairing file. No computer or JIT is needed after setup.")
+                    Text("Ferry installs apps through a loopback VPN (LocalDevVPN or StosVPN) and this iPhone's pairing file. On iOS 26.4 and later use a RemotePairing (RPPairing) file. No computer or JIT is needed after setup.")
                 }
 
                 Section {
@@ -82,7 +83,7 @@ struct SettingsView: View {
                 } header: {
                     Text("Advanced")
                 } footer: {
-                    Text("The device address is where the VPN routes this iPhone's lockdown service (10.7.0.1 for LocalDevVPN/StosVPN).")
+                    Text("Device address \"auto\" uses the VPN tunnel's peer, normally 10.7.0.1.")
                 }
 
                 Section {
@@ -203,7 +204,7 @@ struct AccountView: View {
 struct SetupGuide: View {
     var body: some View {
         List {
-            step(1, "Make a pairing file", "On a computer, pair this iPhone and export its pairing file, e.g. with Jimpactor (Device → Export Pairing), jitterbugpair or idevice_pair. AirDrop or save it to Files.")
+            step(1, "Make a pairing file", "On a computer, pair this iPhone and export its RemotePairing (RPPairing) file, e.g. with Jimpactor. iOS 26.4 and later need this kind; older iOS also accepts a lockdown pairing file. AirDrop it or save it to Files.")
             step(2, "Import it", "Settings → Import Pairing File. It stays in Ferry's container.")
             step(3, "Install a loopback VPN", "LocalDevVPN or StosVPN from the App Store. Turn it on whenever you install or refresh.")
             step(4, "Sign in", "Use any Apple ID. Ferry creates a development certificate and registers this iPhone.")

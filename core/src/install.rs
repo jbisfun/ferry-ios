@@ -6,11 +6,7 @@ use std::{
 
 use plist::Value;
 use plume_core::MachO;
-use xkit::{
-    AutoSigner, TargetDevice,
-    installation::{AppInstaller, ConnectionPreferences, InstallationStage},
-    utilities::ZIPCompressor,
-};
+use xkit::{AutoSigner, TargetDevice, utilities::ZIPCompressor};
 
 use crate::{
     Ctx, Error, Result, account, bundle, device, err, library,
@@ -78,6 +74,17 @@ fn icon_in(app: &Path, info: &plist::Dictionary) -> Option<PathBuf> {
     None
 }
 
+/// Ask the user for the code the iPhone shows when it wants to pair again.
+pub fn pin_prompt(ctx: &Ctx) -> impl Fn() -> futures::future::BoxFuture<'static, String> + Send + Sync {
+    let ctx = ctx.clone();
+    move || {
+        let ctx = ctx.clone();
+        Box::pin(async move {
+            ctx.prompt(crate::protocol::PromptRequest::PairingPin).await.ok().and_then(|a| a.code).unwrap_or_default()
+        })
+    }
+}
+
 pub async fn install(ctx: &Ctx, ipa: &Path, opts: InstallOptions, record: bool) -> Result<LibraryApp> {
     install_inner(ctx, ipa, opts, record).await.map_err(friendly)
 }
@@ -92,9 +99,12 @@ async fn install_inner(ctx: &Ctx, ipa: &Path, opts: InstallOptions, record: bool
     let _device = ctx.shared.device_lock.lock().await;
 
     ctx.progress("Connecting", None);
-    let conn = device::connection(&cfg).await?;
-    let device_name = conn.device_name().await.unwrap_or_else(|_| "iPhone".into());
-    let udid = conn.udid.clone();
+    let pin = pin_prompt(ctx);
+    let dev = device::open(&cfg, Some(&pin)).await?.info().await?;
+    if dev.udid.is_empty() {
+        return err("This iPhone didn't report its UDID");
+    }
+    let (udid, device_name) = (dev.udid, if dev.name.is_empty() { "iPhone".to_string() } else { dev.name });
 
     ctx.progress("Unpacking", Some(0.0));
     let staging = Staging(PathBuf::from(&cfg.tmp_dir).join(format!("install-{}", uuid::Uuid::new_v4())));
@@ -145,8 +155,11 @@ async fn install_inner(ctx: &Ctx, ipa: &Path, opts: InstallOptions, record: bool
             .map_err(|e| Error::Message(e.to_string()))??;
     }
 
-    AppInstaller { ipa: signed, udid, connection_preferences: ConnectionPreferences::default() }
-        .install_with_connection(&conn, &|st: InstallationStage| ctx.progress(st.display_name(), Some(st.display_progress())))
+    // A fresh connection: signing can outlast an idle tunnel.
+    ctx.progress("Connecting", None);
+    device::open(&cfg, Some(&pin))
+        .await?
+        .install(&signed, &installed_id, &|stage, f| ctx.progress(stage, f))
         .await?;
 
     let app_record = LibraryApp {
