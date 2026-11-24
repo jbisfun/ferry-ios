@@ -119,8 +119,10 @@ async fn gsa_login(anisette: AnisetteData, email: &str, password: &str, ctx: &Ct
                 second_factor(&acct, ctx, true, true).await?;
                 LoginState::NeedsLogin
             }
+            // Normal 2FA first even when Apple suggests SMS; texting stays
+            // available from the code sheet.
             LoginState::NeedsSMS2FA | LoginState::NeedsSMS2FAVerification(_) => {
-                second_factor(&acct, ctx, false, false).await?;
+                second_factor(&acct, ctx, true, false).await?;
                 LoginState::NeedsLogin
             }
         };
@@ -373,9 +375,9 @@ pub async fn login(ctx: &Ctx, email: &str, password: &str) -> Result<AccountInfo
     let password = password.to_owned();
     let c2 = ctx.clone();
     let anisette_dir = PathBuf::from(&cfg.data_dir).join("anisette");
-    // Identities provisioned before the client-info fix were made under the
-    // Mac description Apple blocks, and GSA rejects them (-22410). Start over once.
-    let marker = anisette_dir.join("client-info-v2");
+    // Identities provisioned under an older Mac description (blocked, or too
+    // old for normal 2FA) are rejected or sent to SMS. Start over once.
+    let marker = anisette_dir.join("client-info-v3");
     if !marker.exists() {
         reset_identity(&anisette_dir);
         let _ = std::fs::create_dir_all(&anisette_dir);

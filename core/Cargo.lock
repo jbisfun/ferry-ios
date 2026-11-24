@@ -2821,7 +2821,7 @@ dependencies = [
 [[package]]
 name = "omnisette"
 version = "0.1.22"
-source = "git+https://github.com/jbisfun/omnisette#f94512ec71a41416739aeae0cf9cc2f4082c6f61"
+source = "git+https://github.com/jbisfun/omnisette#d88e7f26f39d3336982ecfd5c6954241bfdffa83"
 dependencies = [
  "adi-core",
  "android-loader",
