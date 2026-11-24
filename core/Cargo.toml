@@ -43,7 +43,3 @@ lto = false
 opt-level = "s"
 strip = "debuginfo"
 
-# omnisette's iOS (remote-only) gating is committed locally but not pushed yet;
-# drop this once github.com/jbisfun/omnisette has it.
-[patch."https://github.com/jbisfun/omnisette"]
-omnisette = { path = "../../omnisette" }

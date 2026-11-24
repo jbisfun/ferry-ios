@@ -51,5 +51,6 @@ The IPA must be re-signed to install (e.g. `idl install <udid> Ferry` through
 Jimpactor, or desktop Ferry). After that Ferry refreshes itself like any other
 app in its library once you add its IPA.
 
-`core/Cargo.toml` patches `omnisette` to `../../omnisette` until the iOS
-(remote-only) build gating there is pushed.
+On-device anisette needs the interpreter-only (TCI) Unicorn for iOS: build it
+with `bash ~/projs/WaffleStore/AnisetteKit/MacADI/build-ios.sh` or point
+`UNICORN_IOS_DIR` at your own build.
